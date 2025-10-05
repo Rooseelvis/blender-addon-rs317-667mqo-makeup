@@ -19,7 +19,7 @@ Feature | What It Does | Why You'll Love It
 Model Weighter | VSKIN vertex weighting with body-part presets & mirroring | Quick skeletal setups—no more manual bone painting!
 Priority Painter | RSPRI face priorities (0-255) for render depth | Perfect overlays for transparent effects like capes.
 TSKIN Painter | RSTSKIN texture groups for multi-layer sorting | Seamless texture stacking with material-matched colors.
-PMN Texturing | Procedural UVs with PMN projections & looping animations | Auto-sync UVs to textures; supports cylindrical/spherical modes.
+PMN Texturing | Procedural UVs with PMN projections & looping animations | Auto-sync UVs to textures;.
 Aether Materials | RGB/HSV tinting, UV-sampling, & alpha control | Dynamic recolors + randomization for endless variations.
 Exporter | .dat exports with auto-type detection & drop variants | One-click normal + _drop.dat files for inventory bliss.
 Importers | 317/OSRS & 667 .dat loading with full reconstruction | Brings legacy models to life, textures included (via texture_dump).

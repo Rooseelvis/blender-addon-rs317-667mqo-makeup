@@ -175,7 +175,7 @@ RS-Style Render | Cel-shaded viewport setup | Preview your models in authentic R
 </ul>
 <p dir="auto" style="white-space: pre-wrap;"><strong>Pro Moves</strong>:</p>
 <ul dir="auto">
-<li>PMN vectors per-mat; 667 importer handles fancy projections (cyl/sphere).</li>
+<li>PMN vectors per-mat; 667 importer handles fancy projections.</li>
 <li><span>texture_dump</span>: PMN_1.png = ID 1—easy peasy.</li>
 </ul>
 <h2 dir="auto">5. Aether Materials: Hue &amp; Cry</h2>

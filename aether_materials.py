@@ -1,88 +1,32 @@
 # aether_materials.py
-# Aether Materials - Color Tinting and Alpha Transparency System
-# Integrated into RSPS ADDON
+# Aether Materials - Professional Color Engine for OSRS Models
+# Optimized for 1000+ Principled BSDF materials
 import bpy
 import random
 from colorsys import rgb_to_hsv, hsv_to_rgb
-from bpy_extras.io_utils import ImportHelper
-from collections import defaultdict
 import bmesh
 # ===============================================================
-# TEXTURE SELECTION & MATERIAL CREATION
+# CORE UTILITIES
 # ===============================================================
-class AETHER_OT_SelectTexture(bpy.types.Operator, ImportHelper):
-    """Select texture to create materials from UV colors"""
-    bl_idname = "aether.select_texture"
-    bl_label = "Select Texture"
-    bl_options = {'REGISTER', 'UNDO'}
-    filter_glob: bpy.props.StringProperty(default="*.png;*.jpg;*.tga;*.dds;*.jpeg", options={'HIDDEN'})
-    def execute(self, context):
-        texture_path = self.filepath
-        result = self.create_materials_from_texture(context, texture_path)
-        if result:
-            self.report({'INFO'}, f"Created materials from texture")
-        return {'FINISHED'}
-    def create_materials_from_texture(self, context, texture_path):
-        """Creates materials from texture based on UV coordinates"""
-        obj = context.active_object
-        if not obj or obj.type != 'MESH':
-            self.report({'ERROR'}, "Selected object is not a mesh.")
-            return False
-        uv_map = obj.data.uv_layers.active
-        if not uv_map:
-            self.report({'ERROR'}, "No active UV map found.")
-            return False
-        texture_image = bpy.data.images.load(texture_path, check_existing=True)
-        materials_dict = {}
-        def sample_color(uv_coords):
-            width, height = texture_image.size
-            pixel_x = int(uv_coords[0] * width)
-            pixel_y = int(uv_coords[1] * height)
-            if 0 <= pixel_x < width and 0 <= pixel_y < height:
-                pixel_index = (pixel_y * width + pixel_x) * 4
-                return tuple(texture_image.pixels[pixel_index:pixel_index + 4])
-            return None
-        for face in obj.data.polygons:
-            total_uv = [0, 0]
-            for loop_index in face.loop_indices:
-                uv_coords = uv_map.data[loop_index].uv
-                total_uv[0] += uv_coords[0]
-                total_uv[1] += uv_coords[1]
-            avg_uv = [coord / len(face.loop_indices) for coord in total_uv]
-            color = sample_color(avg_uv)
-            if color is not None:
-                if color not in materials_dict:
-                    material_name = f"Aether_Mat_{len(materials_dict)}"
-                    material = bpy.data.materials.new(name=material_name)
-                    material.use_nodes = True
-                    bsdf = material.node_tree.nodes["Principled BSDF"]
-                    bsdf.inputs["Base Color"].default_value = color
-                    bsdf.inputs["Roughness"].default_value = 1.0
-                    materials_dict[color] = material
-                mat = materials_dict[color]
-                if obj.data.materials.find(mat.name) == -1:
-                    obj.data.materials.append(mat)
-                face.material_index = obj.data.materials.find(mat.name)
-        self.store_original_colors(obj)
-        return True
-    def store_original_colors(self, obj):
-        """Store current colors as original"""
+def store_original_colors(obj):
+    """Saves the current base colors so we can offset from them."""
+    if "original_colors" not in obj:
         obj["original_colors"] = {}
-        for mat in obj.data.materials:
-            if mat and mat.use_nodes:
-                bsdf = mat.node_tree.nodes.get("Principled BSDF")
-                if bsdf:
-                    current_color = bsdf.inputs['Base Color'].default_value[:3]
-                    obj["original_colors"][mat.name] = current_color
-# ===============================================================
-# COLOR ADJUSTMENT FUNCTIONS
-# ===============================================================
+    for mat in obj.data.materials:
+        if mat and mat.use_nodes:
+            bsdf = mat.node_tree.nodes.get("Principled BSDF")
+            if bsdf:
+                color = bsdf.inputs['Base Color'].default_value
+                obj["original_colors"][mat.name] = list(color[:3])
+
 def duplicate_shared_materials(obj):
+    """Duplicate materials that are shared between selected and non-selected faces in Edit Mode."""
     if obj.mode != 'EDIT':
         return
     bm = bmesh.from_edit_mesh(obj.data)
     selected_faces = [f for f in bm.faces if f.select]
     if not selected_faces:
+        bmesh.update_edit_mesh(obj.data)
         return
     for mat_idx in set(f.material_index for f in selected_faces):
         non_selected = any(not f.select and f.material_index == mat_idx for f in bm.faces)
@@ -90,358 +34,447 @@ def duplicate_shared_materials(obj):
             old_mat = obj.data.materials[mat_idx]
             if old_mat:
                 new_mat = old_mat.copy()
-                new_mat.name = old_mat.name + "_Unique"
+                new_mat.name = old_mat.name + "_unique"
                 obj.data.materials.append(new_mat)
                 new_idx = len(obj.data.materials) - 1
                 for f in selected_faces:
                     if f.material_index == mat_idx:
                         f.material_index = new_idx
                 if "original_colors" in obj:
-                    orig = obj["original_colors"].get(old_mat.name, (1,1,1))
-                    obj["original_colors"][new_mat.name] = list(orig)
+                    orig = obj["original_colors"].get(old_mat.name, [0.8, 0.8, 0.8])
+                    obj["original_colors"][new_mat.name] = orig[:]
     bmesh.update_edit_mesh(obj.data)
-def update_material_colors(self, context):
-    """Update material colors based on RGB/HSV sliders for all selected objects"""
-    selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
-    if not selected_objects:
-        return
-    # Get RGB properties from scene
-    rgb_props = context.scene.aether_rgb_props
-    for obj in selected_objects:
-        if "original_colors" not in obj:
+
+def refresh_materials(context):
+    """Forces all selected objects to re-calculate their colors."""
+    props = context.scene.aether_rgb_props
+    selected_objs = [o for o in context.selected_objects if o.type == 'MESH']
+    alpha = props.alpha_value / 100.0
+    for obj in selected_objs:
+        if "original_colors" not in obj or not obj["original_colors"]:
             store_original_colors(obj)
         duplicate_shared_materials(obj)
         if obj.mode == 'EDIT':
             bm = bmesh.from_edit_mesh(obj.data)
-            selected_faces = [f for f in bm.faces if f.select]
-            if not selected_faces:
-                continue
-            selected_mat_indices = set(f.material_index for f in selected_faces)
-            mat_list = [obj.data.materials[i] for i in selected_mat_indices if i < len(obj.data.materials)]
+            selected_mat_indices = {f.material_index for f in bm.faces if f.select}
+            mats_to_process = [(i, obj.data.materials[i]) for i in selected_mat_indices
+                              if i < len(obj.data.materials) and obj.data.materials[i]]
         else:
-            mat_list = obj.data.materials
-        for mat in mat_list:
-            if mat and mat.use_nodes:
-                bsdf = mat.node_tree.nodes.get("Principled BSDF")
-                if bsdf:
-                    base_mat_name = mat.name.replace("_Transparent", "")
-                    original_color = obj["original_colors"].get(mat.name,
-                                                                 obj["original_colors"].get(base_mat_name, (1, 1, 1)))
-                    hsv_color = rgb_to_hsv(*original_color)
-                    new_h = (hsv_color[0] + rgb_props.hue_value) % 1
-                    new_s = hsv_color[1] * rgb_props.saturation_value
-                    # Only boost saturation for whites/grays if properties are NOT at default values
-                    if hsv_color[1] < 0.1 and (rgb_props.hue_value != 0.0 or rgb_props.saturation_value != 1.0 or rgb_props.value_value != 1.0):
-                        new_s = 0.8 * rgb_props.saturation_value
-                    new_v = hsv_color[2] * rgb_props.value_value
-                    tinted_rgb = hsv_to_rgb(new_h, new_s, new_v)
-                    final_color = (
-                        tinted_rgb[0] * rgb_props.r_value,
-                        tinted_rgb[1] * rgb_props.g_value,
-                        tinted_rgb[2] * rgb_props.b_value,
-                        1
-                    )
-                    bsdf.inputs['Base Color'].default_value = final_color
-def update_alpha_transparency(self, context):
-    """Update alpha transparency for materials on selected faces"""
-    selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
-    if not selected_objects:
-        return
-    # Get RGB properties from scene
-    rgb_props = context.scene.aether_rgb_props
-    alpha = rgb_props.alpha_value / 100.0
-    for obj in selected_objects:
-        # Only update if in Edit Mode to respect face selection
-        if obj.mode == 'EDIT':
-            bm = bmesh.from_edit_mesh(obj.data)
-            selected_faces = [f for f in bm.faces if f.select]
-            if not selected_faces:
+            mats_to_process = [(i, mat) for i, mat in enumerate(obj.data.materials) if mat]
+        for mat_index, mat in mats_to_process:
+            if not mat or not mat.use_nodes:
                 continue
-            # Get material indices of selected faces only
-            selected_mat_indices = set(f.material_index for f in selected_faces)
-            # Update alpha only for materials used by selected faces
-            for mat_idx in selected_mat_indices:
-                if mat_idx < len(obj.data.materials):
-                    mat = obj.data.materials[mat_idx]
-                    if mat and mat.use_nodes and mat.blend_method == 'BLEND':
-                        bsdf = mat.node_tree.nodes.get("Principled BSDF")
-                        if bsdf:
-                            bsdf.inputs['Alpha'].default_value = alpha
-        else:
-            # In Object Mode, update all materials with alpha enabled
-            for mat in obj.data.materials:
-                if mat and mat.use_nodes and mat.blend_method == 'BLEND':
-                    bsdf = mat.node_tree.nodes.get("Principled BSDF")
-                    if bsdf:
-                        bsdf.inputs['Alpha'].default_value = alpha
-def store_original_colors(obj):
-    """Store the current colors as original"""
-    obj["original_colors"] = {}
-    for mat in obj.data.materials:
-        if mat and mat.use_nodes:
             bsdf = mat.node_tree.nodes.get("Principled BSDF")
-            if bsdf:
-                current_color = bsdf.inputs['Base Color'].default_value[:3]
-                obj["original_colors"][mat.name] = current_color
-def reset_rgb_properties(rgb_props):
-    """Reset RGB properties to defaults"""
-    rgb_props.r_value = 1.0
-    rgb_props.g_value = 1.0
-    rgb_props.b_value = 1.0
-    rgb_props.hue_value = 0.0
-    rgb_props.saturation_value = 1.0
-    # THIS IS THE CORRECTED LINE
-    rgb_props.value_value = 1.0
-    rgb_props.alpha_value = 100.0
-# ===============================================================
-# PRESET DEFINITIONS - CURATED COLLECTION
-# ===============================================================
-PRESETS = {
-    # Red Family
-    "Crimson": {"r": 0.86, "g": 0.08, "b": 0.24, "h": 0.98, "s": 0.91, "v": 0.6},
-    "Ruby": {"r": 0.88, "g": 0.07, "b": 0.37, "h": 0.95, "s": 0.92, "v": 0.8},
-    "Wine": {"r": 0.45, "g": 0.09, "b": 0.09, "h": 0.0, "s": 0.8, "v": 0.35},
-    # Orange Family
-    "Tangerine": {"r": 0.95, "g": 0.52, "b": 0.0, "h": 0.09, "s": 1.0, "v": 1.0},
-    "Copper": {"r": 0.72, "g": 0.45, "b": 0.2, "h": 0.08, "s": 0.72, "v": 0.7},
-    # Yellow/Gold Family
-    "Gold": {"r": 1.0, "g": 0.84, "b": 0.0, "h": 0.14, "s": 1.0, "v": 1.3},
-    "Honey": {"r": 0.9, "g": 0.7, "b": 0.2, "h": 0.14, "s": 0.78, "v": 0.9},
-    # Green Family
-    "Emerald": {"r": 0.08, "g": 0.78, "b": 0.38, "h": 0.35, "s": 0.9, "v": 0.78},
-    "Jade": {"r": 0.0, "g": 0.66, "b": 0.42, "h": 0.36, "s": 1.0, "v": 0.7},
-    "Lime": {"r": 0.75, "g": 1.0, "b": 0.0, "h": 0.19, "s": 1.0, "v": 1.2},
-    "Forest": {"r": 0.13, "g": 0.55, "b": 0.13, "h": 0.33, "s": 0.76, "v": 0.5},
-    # Cyan/Teal Family
-    "Cyan": {"r": 0.0, "g": 1.0, "b": 1.0, "h": 0.5, "s": 1.0, "v": 1.3},
-    "Turquoise": {"r": 0.19, "g": 0.84, "b": 0.78, "h": 0.48, "s": 0.77, "v": 0.95},
-    "Teal": {"r": 0.0, "g": 0.5, "b": 0.5, "h": 0.5, "s": 1.0, "v": 0.55},
-    # Blue Family
-    "Sapphire": {"r": 0.06, "g": 0.32, "b": 0.73, "h": 0.6, "s": 0.92, "v": 0.75},
-    "Cobalt": {"r": 0.0, "g": 0.28, "b": 0.67, "h": 0.61, "s": 1.0, "v": 0.7},
-    "Sky": {"r": 0.53, "g": 0.81, "b": 0.92, "h": 0.57, "s": 0.43, "v": 1.0},
-    "Navy": {"r": 0.0, "g": 0.0, "b": 0.5, "h": 0.67, "s": 1.0, "v": 0.4},
-    # Purple Family
-    "Amethyst": {"r": 0.6, "g": 0.4, "b": 0.8, "h": 0.75, "s": 0.5, "v": 0.85},
-    "Violet": {"r": 0.93, "g": 0.51, "b": 0.93, "h": 0.83, "s": 0.45, "v": 1.0},
-    "Indigo": {"r": 0.29, "g": 0.0, "b": 0.51, "h": 0.76, "s": 1.0, "v": 0.5},
-    # Pink/Magenta Family
-    "Magenta": {"r": 1.0, "g": 0.0, "b": 0.75, "h": 0.88, "s": 1.0, "v": 1.1},
-    "Hot Pink": {"r": 1.0, "g": 0.41, "b": 0.71, "h": 0.92, "s": 0.59, "v": 1.0},
-    "Rose": {"r": 1.0, "g": 0.0, "b": 0.5, "h": 0.92, "s": 1.0, "v": 0.9},
-    # Metallic Family
-    "Silver": {"r": 0.75, "g": 0.75, "b": 0.75, "h": 0.0, "s": 0.0, "v": 1.5},
-    "Platinum": {"r": 0.9, "g": 0.89, "b": 0.89, "h": 0.0, "s": 0.01, "v": 1.8},
-    "Bronze": {"r": 0.8, "g": 0.5, "b": 0.2, "h": 0.08, "s": 0.75, "v": 0.75},
-    # Dark/Shadow
-    "Obsidian": {"r": 0.05, "g": 0.05, "b": 0.05, "h": 0.0, "s": 0.0, "v": 0.1},
-    "Shadow": {"r": 0.5, "g": 0.15, "b": 0.7, "h": 0.76, "s": 0.79, "v": 0.5},
-    # Mystical/Fantasy
-    "Arcane": {"r": 0.4, "g": 0.15, "b": 0.8, "h": 0.73, "s": 0.81, "v": 0.85},
-    "Celestial": {"r": 0.53, "g": 0.81, "b": 0.98, "h": 0.57, "s": 0.46, "v": 1.2},
-    "Ethereal": {"r": 0.8, "g": 0.7, "b": 1.0, "h": 0.73, "s": 0.3, "v": 1.3},
-}
-# ===============================================================
-# PRESET OPERATORS
-# ===============================================================
-class AETHER_OT_ApplyPreset(bpy.types.Operator):
-    """Apply a color preset to RGB properties"""
-    bl_idname = "aether.apply_preset"
-    bl_label = "Apply Preset"
-    bl_options = {'REGISTER', 'UNDO'}
-    preset_name: bpy.props.StringProperty()
-    def execute(self, context):
-        # Use scene-level properties
-        rgb_props = context.scene.aether_rgb_props
-        if self.preset_name in PRESETS:
-            preset = PRESETS[self.preset_name]
-            rgb_props.r_value = preset["r"]
-            rgb_props.g_value = preset["g"]
-            rgb_props.b_value = preset["b"]
-            rgb_props.hue_value = preset["h"]
-            rgb_props.saturation_value = preset["s"]
-            rgb_props.value_value = preset["v"]
-            # Trigger update
-            update_material_colors(None, context)
-        self.report({'INFO'}, f"Applied preset: {self.preset_name}")
-        return {'FINISHED'}
-# ===============================================================
-# PROPERTY GROUP
-# ===============================================================
-class RGBProperties(bpy.types.PropertyGroup):
-    """RGB and HSV color control properties"""
-    r_value: bpy.props.FloatProperty(
-        name="R", description="Red Tint",
-        default=1.0,
-        update=update_material_colors)
-    g_value: bpy.props.FloatProperty(
-        name="G", description="Green Tint",
-        default=1.0,
-        update=update_material_colors)
-    b_value: bpy.props.FloatProperty(
-        name="B", description="Blue Tint",
-        default=1.0,
-        update=update_material_colors)
-    hue_value: bpy.props.FloatProperty(
-        name="Hue", description="Hue Adjustment",
-        default=0.0,
-        update=update_material_colors)
-    saturation_value: bpy.props.FloatProperty(
-        name="Saturation", description="Saturation Adjustment",
-        default=1.0,
-        update=update_material_colors)
-    value_value: bpy.props.FloatProperty(
-        name="Value", description="Value Adjustment",
-        default=1.0,
-        update=update_material_colors)
-    alpha_value: bpy.props.FloatProperty(
-        name="Alpha (%)", description="Transparency level",
-        default=100.0,
-        update=update_alpha_transparency)
+            if not bsdf:
+                continue
+            orig = obj["original_colors"].get(mat.name, [0.8, 0.8, 0.8])
+            r, g, b = orig[0], orig[1], orig[2]
+            r *= props.r_value
+            g *= props.g_value
+            b *= props.b_value
+            max_val = max(r, g, b)
+            if max_val > 0.001:
+                r_norm = r / max_val
+                g_norm = g / max_val
+                b_norm = b / max_val
+                h, s, v = rgb_to_hsv(r_norm, g_norm, b_norm)
+                h = (h + props.hue_value) % 1.0
+                s = max(0.0, min(1.0, s * props.saturation_value))
+                r_norm, g_norm, b_norm = hsv_to_rgb(h, s, v)
+                r = r_norm * max_val
+                g = g_norm * max_val
+                b = b_norm * max_val
+            r *= props.value_value
+            g *= props.value_value
+            b *= props.value_value
+            r *= props.brightness_value
+            g *= props.brightness_value
+            b *= props.brightness_value
+            if props.contrast_value != 1.0:
+                r = 0.5 + (r - 0.5) * props.contrast_value
+                g = 0.5 + (g - 0.5) * props.contrast_value
+                b = 0.5 + (b - 0.5) * props.contrast_value
+            if props.warmth_value != 0.0:
+                shift = props.warmth_value * 0.3
+                r += shift
+                g += shift * 0.5
+                b -= shift
+            if props.tint_value != 0.0:
+                shift = props.tint_value * 0.3
+                g += shift
+                r -= shift * 0.3
+                b -= shift * 0.3
+            if props.vibrance_value != 0.0:
+                max_val = max(r, g, b)
+                if max_val > 0.001:
+                    r_norm = r / max_val
+                    g_norm = g / max_val
+                    b_norm = b / max_val
+                    h_tmp, s_tmp, v_tmp = rgb_to_hsv(r_norm, g_norm, b_norm)
+                    if props.vibrance_value > 0:
+                        sat_boost = props.vibrance_value * (1.0 - s_tmp) * 3.0
+                        s_tmp = max(0.0, min(1.0, s_tmp + sat_boost))
+                    else:
+                        s_tmp = max(0.0, s_tmp + (props.vibrance_value * 2.0))
+                    r_norm, g_norm, b_norm = hsv_to_rgb(h_tmp, s_tmp, v_tmp)
+                    r = r_norm * max_val
+                    g = g_norm * max_val
+                    b = b_norm * max_val
+            if props.color_rotation_value != 0.0:
+                r_orig, g_orig, b_orig = r, g, b
+                rot = props.color_rotation_value
+                if rot > 0:
+                    mix = rot
+                    r = r_orig * (1 - mix) + g_orig * mix
+                    g = g_orig * (1 - mix) + b_orig * mix
+                    b = b_orig * (1 - mix) + r_orig * mix
+                else:
+                    mix = abs(rot)
+                    r = r_orig * (1 - mix) + b_orig * mix
+                    g = g_orig * (1 - mix) + r_orig * mix
+                    b = b_orig * (1 - mix) + g_orig * mix
+            # NEW: Shadows control (-1 to +1)
+            shadows = props.shadows_value
+            if shadows > 0.0:
+                crush = shadows
+                r *= (1.0 - crush)
+                g *= (1.0 - crush)
+                b *= (1.0 - crush)
+            elif shadows < 0.0:
+                lift = -shadows
+                r += lift * (1.0 - r)
+                g += lift * (1.0 - g)
+                b += lift * (1.0 - b)
+            # FINAL CLAMP (allows pure black)
+            r = max(0.0, min(3.0, r))
+            g = max(0.0, min(3.0, g))
+            b = max(0.0, min(3.0, b))
+            bsdf.inputs['Base Color'].default_value = (r, g, b, 1.0)
+            bsdf.inputs['Alpha'].default_value = alpha
+            mat.blend_method = 'BLEND' if alpha < 1.0 else 'OPAQUE'
 # ===============================================================
 # OPERATORS
 # ===============================================================
-class AETHER_OT_ResetMaterials(bpy.types.Operator):
-    """Reset all materials to their original colors on all selected objects"""
-    bl_idname = "aether.reset_materials"
-    bl_label = "Reset to Original Colors"
-    bl_options = {'REGISTER', 'UNDO'}
+class AETHER_OT_OptimizeShading(bpy.types.Operator):
+    bl_idname = "aether.optimize_shading"
+    bl_label = "Optimize OSRS Shading"
+    bl_description = "Apply flat shading and remove specular/metallic effects"
     def execute(self, context):
-        selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
-        reset_count = 0
-        for obj in selected_objects:
-            if "original_colors" not in obj:
+        count = 0
+        for obj in context.selected_objects:
+            if obj.type != 'MESH':
+                continue
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.shade_flat()
+            for mat in obj.data.materials:
+                if mat and mat.use_nodes:
+                    principled = mat.node_tree.nodes.get("Principled BSDF")
+                    if principled:
+                        principled.inputs['Roughness'].default_value = 1.0
+                        principled.inputs['Metallic'].default_value = 0.0
+                        if 'Specular IOR Level' in principled.inputs:
+                            principled.inputs['Specular IOR Level'].default_value = 0.0
+                        elif 'Specular' in principled.inputs:
+                            principled.inputs['Specular'].default_value = 0.0
+                        if 'Coat Weight' in principled.inputs:
+                            principled.inputs['Coat Weight'].default_value = 0.0
+                        if 'Sheen Weight' in principled.inputs:
+                            principled.inputs['Sheen Weight'].default_value = 0.0
+                        if 'Emission Strength' in principled.inputs:
+                            principled.inputs['Emission Strength'].default_value = 0.0
+                        count += 1
+        self.report({'INFO'}, f"Optimized {count} materials")
+        return {'FINISHED'}
+
+class AETHER_OT_ApplyPreset(bpy.types.Operator):
+    bl_idname = "aether.apply_preset"
+    bl_label = "Apply Preset"
+    preset_name: bpy.props.StringProperty()
+    def execute(self, context):
+        props = context.scene.aether_rgb_props
+        p = PRESETS.get(self.preset_name)
+        if p:
+            props.r_value = p["r"]
+            props.g_value = p["g"]
+            props.b_value = p["b"]
+            props.hue_value = p["h"]
+            props.saturation_value = p["s"]
+            props.value_value = p["v"]
+            props.brightness_value = p.get("brightness", 1.0)
+            props.contrast_value = p.get("contrast", 1.0)
+            props.warmth_value = p.get("warmth", 0.0)
+            props.tint_value = p.get("tint", 0.0)
+            props.vibrance_value = p.get("vibrance", 0.0)
+            props.color_rotation_value = p.get("rotation", 0.0)
+            props.shadows_value = p.get("shadows", 0.0)
+            refresh_materials(context)
+            self.report({'INFO'}, f"Applied {self.preset_name}")
+        return {'FINISHED'}
+
+class AETHER_OT_ResetMaterials(bpy.types.Operator):
+    bl_idname = "aether.reset_materials"
+    bl_label = "Reset"
+    bl_description = "Reset all controls and restore original colors"
+    def execute(self, context):
+        props = context.scene.aether_rgb_props
+        props.r_value = 1.0
+        props.g_value = 1.0
+        props.b_value = 1.0
+        props.hue_value = 0.0
+        props.saturation_value = 1.0
+        props.value_value = 1.0
+        props.brightness_value = 1.0
+        props.contrast_value = 1.0
+        props.warmth_value = 0.0
+        props.tint_value = 0.0
+        props.vibrance_value = 0.0
+        props.color_rotation_value = 0.0
+        props.shadows_value = 0.0
+        props.alpha_value = 100.0
+        for obj in context.selected_objects:
+            if obj.type != 'MESH' or "original_colors" not in obj:
                 continue
             if obj.mode == 'EDIT':
                 bm = bmesh.from_edit_mesh(obj.data)
-                selected_faces = [f for f in bm.faces if f.select]
-                if not selected_faces:
-                    continue
-                selected_mat_indices = set(f.material_index for f in selected_faces)
-                mat_list = [obj.data.materials[i] for i in selected_mat_indices if i < len(obj.data.materials)]
+                selected_mat_indices = {f.material_index for f in bm.faces if f.select}
+                mats_to_reset = [(i, obj.data.materials[i]) for i in selected_mat_indices
+                                if i < len(obj.data.materials) and obj.data.materials[i]]
             else:
-                mat_list = obj.data.materials
-            for mat in mat_list:
-                if mat and mat.use_nodes:
+                mats_to_reset = [(i, mat) for i, mat in enumerate(obj.data.materials) if mat]
+            for mat_index, mat in mats_to_reset:
+                if mat and mat.use_nodes and mat.name in obj["original_colors"]:
                     bsdf = mat.node_tree.nodes.get("Principled BSDF")
                     if bsdf:
-                        base_mat_name = mat.name.replace("_Transparent", "")
-                        original_color = obj["original_colors"].get(mat.name,
-                                                                     obj["original_colors"].get(base_mat_name, (1, 1, 1)))
-                        bsdf.inputs['Base Color'].default_value = (*original_color, 1)
-                        if "_Transparent" in mat.name or mat.blend_method == 'BLEND':
-                            bsdf.inputs['Alpha'].default_value = 1.0
-            reset_count += 1
-        # Reset scene-level RGB properties
-        reset_rgb_properties(context.scene.aether_rgb_props)
-        if reset_count > 0:
-            self.report({'INFO'}, f"Reset {reset_count} object(s) to original colors")
-        else:
-            self.report({'WARNING'}, "No objects with stored colors found")
+                        orig = obj["original_colors"][mat.name]
+                        bsdf.inputs['Base Color'].default_value = (orig[0], orig[1], orig[2], 1.0)
+                        bsdf.inputs['Alpha'].default_value = 1.0
+                        mat.blend_method = 'OPAQUE'
+        self.report({'INFO'}, "Reset to original colors")
         return {'FINISHED'}
+
 class AETHER_OT_RandomizeTheme(bpy.types.Operator):
-    """Randomize a themed adjustment like sliders"""
     bl_idname = "aether.randomize_theme"
-    bl_label = "Randomize Theme"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_label = "Random Vibrant Theme"
+    bl_description = "Generate a harmonious vibrant random color variation"
     def execute(self, context):
-        selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
-        if not selected_objects:
-            self.report({'WARNING'}, "No mesh objects selected")
-            return {'CANCELLED'}
-        rgb_props = context.scene.aether_rgb_props
-        # Randomize sliders for themed effect
-        rgb_props.r_value = random.uniform(0.8, 1.2)
-        rgb_props.g_value = random.uniform(0.8, 1.2)
-        rgb_props.b_value = random.uniform(0.8, 1.2)
-        rgb_props.hue_value = random.uniform(-0.3, 0.3)
-        rgb_props.saturation_value = random.uniform(0.8, 1.2)
-        rgb_props.value_value = random.uniform(0.8, 1.2)
-        # Trigger update
-        update_material_colors(None, context)
-        self.report({'INFO'}, "Applied random themed adjustments")
+        props = context.scene.aether_rgb_props
+        props.r_value = 1.0
+        props.g_value = 1.0
+        props.b_value = 1.0
+        props.hue_value = 0.0
+        props.saturation_value = 1.0
+        props.value_value = 1.0
+        props.color_rotation_value = 0.0
+        props.shadows_value = random.uniform(-0.3, 0.5)
+        props.brightness_value = random.uniform(1.0, 1.6)
+        props.contrast_value = random.uniform(1.0, 1.4)
+        props.warmth_value = random.uniform(-0.4, 0.6)
+        props.tint_value = random.uniform(-0.3, 0.3)
+        props.vibrance_value = random.uniform(0.2, 0.5)
+        if random.random() < 0.25:
+            props.color_rotation_value = random.uniform(-0.3, 0.3)
+        props.saturation_value = random.uniform(1.4, 2.0)
+        props.value_value = random.uniform(1.1, 1.6)
+        themes = ['red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple', 'pink', 'neutral', 'wild']
+        theme = random.choice(themes)
+        if theme == 'red':
+            props.r_value = random.uniform(1.5, 2.5)
+            props.g_value = random.uniform(0.75, 1.3)
+            props.b_value = random.uniform(0.75, 1.3)
+            props.hue_value = random.uniform(-0.05, 0.05)
+            props.saturation_value = random.uniform(1.4, 2.0)
+            props.warmth_value += random.uniform(0.3, 0.7)
+        elif theme == 'orange':
+            props.r_value = random.uniform(1.6, 2.5)
+            props.g_value = random.uniform(1.1, 1.8)
+            props.b_value = random.uniform(0.7, 1.2)
+            props.hue_value = random.uniform(0.04, 0.14)
+            props.saturation_value = random.uniform(1.3, 2.0)
+            props.warmth_value += random.uniform(0.4, 0.8)
+        elif theme == 'yellow':
+            props.r_value = random.uniform(1.4, 2.3)
+            props.g_value = random.uniform(1.4, 2.3)
+            props.b_value = random.uniform(0.7, 1.3)
+            props.hue_value = random.uniform(0.07, 0.17)
+            props.saturation_value = random.uniform(1.3, 2.0)
+            props.warmth_value += random.uniform(0.4, 0.8)
+        elif theme == 'green':
+            props.r_value = random.uniform(0.7, 1.3)
+            props.g_value = random.uniform(1.5, 2.5)
+            props.b_value = random.uniform(0.75, 1.4)
+            props.hue_value = random.uniform(0.22, 0.42)
+            props.saturation_value = random.uniform(1.2, 1.9)
+            props.warmth_value += random.uniform(-0.2, 0.2)
+        elif theme == 'cyan':
+            props.r_value = random.uniform(0.7, 1.3)
+            props.g_value = random.uniform(1.4, 2.3)
+            props.b_value = random.uniform(1.4, 2.3)
+            props.hue_value = random.uniform(0.45, 0.58)
+            props.saturation_value = random.uniform(1.3, 2.0)
+            props.warmth_value += random.uniform(-0.4, -0.1)
+        elif theme == 'blue':
+            props.r_value = random.uniform(0.7, 1.2)
+            props.g_value = random.uniform(0.8, 1.4)
+            props.b_value = random.uniform(1.5, 2.5)
+            props.hue_value = random.uniform(0.58, 0.75)
+            props.saturation_value = random.uniform(1.2, 1.9)
+            props.warmth_value += random.uniform(-0.6, -0.2)
+        elif theme == 'purple':
+            props.r_value = random.uniform(1.3, 2.2)
+            props.g_value = random.uniform(0.7, 1.2)
+            props.b_value = random.uniform(1.4, 2.3)
+            props.hue_value = random.uniform(0.75, 0.95)
+            props.saturation_value = random.uniform(1.3, 2.0)
+            props.warmth_value += random.uniform(-0.1, 0.3)
+        elif theme == 'pink':
+            props.r_value = random.uniform(1.5, 2.4)
+            props.g_value = random.uniform(0.8, 1.4)
+            props.b_value = random.uniform(1.3, 2.2)
+            props.hue_value = random.uniform(-0.06, 0.04)
+            props.saturation_value = random.uniform(1.2, 1.8)
+            props.warmth_value += random.uniform(0.2, 0.5)
+        elif theme == 'neutral':
+            props.r_value = random.uniform(0.95, 1.4)
+            props.g_value = random.uniform(0.95, 1.4)
+            props.b_value = random.uniform(0.95, 1.4)
+            props.hue_value = random.uniform(-0.1, 0.1)
+            props.saturation_value = random.uniform(0.5, 1.0)
+            props.value_value = random.uniform(1.1, 1.6)
+        elif theme == 'wild':
+            props.r_value = random.uniform(0.8, 2.4)
+            props.g_value = random.uniform(0.8, 2.4)
+            props.b_value = random.uniform(0.8, 2.4)
+            props.hue_value = random.uniform(-0.4, 0.4)
+            props.saturation_value = random.uniform(0.9, 2.0)
+            props.value_value = random.uniform(0.9, 1.6)
+            props.color_rotation_value = random.uniform(-0.6, 0.6)
+        refresh_materials(context)
+        self.report({'INFO'}, f"Random vibrant {theme.capitalize()} theme applied")
         return {'FINISHED'}
+
 class AETHER_OT_ApplyOriginalColors(bpy.types.Operator):
-    """Store current colors as new original colors for all selected objects"""
     bl_idname = "aether.apply_original_colors"
-    bl_label = "Apply Original Colors"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_label = "Apply as Baseline"
+    bl_description = "Save current colors as new baseline"
     def execute(self, context):
-        selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
-        if not selected_objects:
-            self.report({'WARNING'}, "No mesh objects selected")
-            return {'CANCELLED'}
-        for obj in selected_objects:
-            if "original_colors" not in obj:
+        for obj in context.selected_objects:
+            if obj.type == 'MESH':
                 obj["original_colors"] = {}
-            if obj.mode == 'EDIT':
-                bm = bmesh.from_edit_mesh(obj.data)
-                selected_faces = [f for f in bm.faces if f.select]
-                if not selected_faces:
-                    continue
-                selected_mat_indices = set(f.material_index for f in selected_faces)
-                mat_list = [obj.data.materials[i] for i in selected_mat_indices if i < len(obj.data.materials)]
-            else:
-                mat_list = obj.data.materials
-            for mat in mat_list:
-                if mat and mat.use_nodes:
-                    bsdf = mat.node_tree.nodes.get("Principled BSDF")
-                    if bsdf:
-                        current_color = bsdf.inputs['Base Color'].default_value[:3]
-                        obj["original_colors"][mat.name] = current_color
-        self.report({'INFO'}, f"Applied current colors as original for {len(selected_objects)} object(s)")
+                store_original_colors(obj)
+        props = context.scene.aether_rgb_props
+        props.r_value = 1.0
+        props.g_value = 1.0
+        props.b_value = 1.0
+        props.hue_value = 0.0
+        props.saturation_value = 1.0
+        props.value_value = 1.0
+        props.brightness_value = 1.0
+        props.contrast_value = 1.0
+        props.warmth_value = 0.0
+        props.tint_value = 0.0
+        props.vibrance_value = 0.0
+        props.color_rotation_value = 0.0
+        props.shadows_value = 0.0
+        self.report({'INFO'}, "Current colors set as new baseline")
         return {'FINISHED'}
-class AETHER_OT_EnableAlpha(bpy.types.Operator):
-    """Enable transparency on materials of selected faces"""
-    bl_idname = "aether.enable_alpha"
-    bl_label = "Enable Alpha on Selected Faces"
-    bl_options = {'REGISTER', 'UNDO'}
+
+class AETHER_OT_PrintCurrentPreset(bpy.types.Operator):
+    bl_idname = "aether.print_current_preset"
+    bl_label = "Print Preset"
+    bl_description = "Print current slider values as preset format (check console)"
+    preset_name: bpy.props.StringProperty(name="Preset Name", default="MyPreset")
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "preset_name")
     def execute(self, context):
-        obj = context.active_object
-        if not obj or obj.type != 'MESH':
-            self.report({'WARNING'}, "Select a mesh object.")
-            return {'CANCELLED'}
-        # Ensure we're in Edit Mode
-        original_mode = obj.mode
-        if context.mode != 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='EDIT')
-        # Switch to Object Mode to read face selection
-        bpy.ops.object.mode_set(mode='OBJECT')
-        selected_faces = [f for f in obj.data.polygons if f.select]
-        if not selected_faces:
-            self.report({'WARNING'}, "No faces selected.")
-            bpy.ops.object.mode_set(mode=original_mode)
-            return {'CANCELLED'}
-        # Get unique material indices from selected faces
-        selected_mat_indices = set(f.material_index for f in selected_faces)
-        # Enable alpha on those materials
-        materials_affected = 0
-        for mat_idx in selected_mat_indices:
-            if mat_idx < len(obj.data.materials):
-                mat = obj.data.materials[mat_idx]
-                if mat and mat.use_nodes:
-                    # Enable alpha blending
-                    mat.blend_method = 'BLEND'
-                    # Set shadow method if the attribute exists (older Blender versions)
-                    if hasattr(mat, 'shadow_method'):
-                        mat.shadow_method = 'CLIP'
-                    # Set initial alpha value
-                    bsdf = mat.node_tree.nodes.get("Principled BSDF")
-                    if bsdf:
-                        bsdf.inputs['Alpha'].default_value = 0.5
-                        materials_affected += 1
-        # Set initial alpha value in scene properties
-        context.scene.aether_rgb_props.alpha_value = 50.0
-        # Return to original mode
-        bpy.ops.object.mode_set(mode=original_mode)
-        self.report({'INFO'}, f"Enabled alpha on {materials_affected} material(s) for {len(selected_faces)} selected faces")
+        props = context.scene.aether_rgb_props
+        preset_line = f' "{self.preset_name}": {{'
+        preset_line += f'"r": {props.r_value:.2f}, '
+        preset_line += f'"g": {props.g_value:.2f}, '
+        preset_line += f'"b": {props.b_value:.2f}, '
+        preset_line += f'"h": {props.hue_value:.2f}, '
+        preset_line += f'"s": {props.saturation_value:.2f}, '
+        preset_line += f'"v": {props.value_value:.2f}, '
+        preset_line += f'"brightness": {props.brightness_value:.2f}, '
+        preset_line += f'"contrast": {props.contrast_value:.2f}, '
+        preset_line += f'"warmth": {props.warmth_value:.2f}, '
+        preset_line += f'"tint": {props.tint_value:.2f}, '
+        preset_line += f'"vibrance": {props.vibrance_value:.2f}, '
+        preset_line += f'"rotation": {props.color_rotation_value:.2f}, '
+        preset_line += f'"shadows": {props.shadows_value:.2f}'
+        preset_line += '},'
+        print("\n" + "="*80)
+        print("COPY THIS LINE AND PASTE INTO PRESETS DICTIONARY:")
+        print("="*80)
+        print(preset_line)
+        print("="*80 + "\n")
+        context.window_manager.clipboard = preset_line
+        self.report({'INFO'}, "Preset copied to clipboard + console")
         return {'FINISHED'}
+
 # ===============================================================
-# UI PANELS (Integrated into RSPS ADDON)
+# PRESETS
+# ===============================================================
+PRESETS = {
+    "Crimson": {"r": 1.6, "g": 0.7, "b": 0.7, "h": 0.0, "s": 1.3, "v": 1.0, "brightness": 1.0, "contrast": 1.1, "warmth": 0.3, "tint": 0.0, "vibrance": 0.2, "rotation": 0.0},
+    "Ruby": {"r": 2.50, "g": 0.00, "b": 0.00, "h": -0.06, "s": 1.77, "v": 0.90, "brightness": 2.00, "contrast": 1.25, "warmth": 0.24, "tint": -0.04, "vibrance": -0.21, "rotation": 0.0},
+    "Wine": {"r": 1.5, "g": 0.7, "b": 1.1, "h": 0.03, "s": 1.3, "v": 1.0, "brightness": 1.0, "contrast": 1.15, "warmth": 0.25, "tint": 0.15, "vibrance": 0.15, "rotation": 0.0},
+    "Tangerine": {"r": 1.7, "g": 1.1, "b": 0.6, "h": 0.07, "s": 1.4, "v": 1.1, "brightness": 1.1, "contrast": 1.0, "warmth": 0.45, "tint": 0.0, "vibrance": 0.15, "rotation": 0.0},
+    "Gold": {"r": 1.60, "g": 1.40, "b": 0.60, "h": 0.12, "s": 1.30, "v": 2.00, "brightness": 2.00, "contrast": 0.85, "warmth": 0.32, "tint": 0.00, "vibrance": 0.10, "rotation": 0.0},
+    "Bronze": {"r": 1.4, "g": 1.0, "b": 0.7, "h": 0.10, "s": 1.2, "v": 1.0, "brightness": 1.0, "contrast": 1.1, "warmth": 0.35, "tint": 0.0, "vibrance": 0.15, "rotation": 0.0},
+    "Emerald": {"r": 2.50, "g": 2.50, "b": 0.00, "h": 0.25, "s": 1.30, "v": 1.56, "brightness": 1.25, "contrast": 1.03, "warmth": -0.14, "tint": 0.32, "vibrance": -0.10, "rotation": 0.0},
+    "Jade": {"r": 0.8, "g": 1.5, "b": 1.0, "h": 0.28, "s": 1.2, "v": 1.0, "brightness": 1.0, "contrast": 1.05, "warmth": -0.15, "tint": 0.0, "vibrance": 0.2, "rotation": 0.0},
+    "Lime": {"r": 0.78, "g": 2.50, "b": 0.00, "h": 0.20, "s": 1.40, "v": 2.00, "brightness": 2.00, "contrast": 0.93, "warmth": -0.07, "tint": 0.06, "vibrance": 0.50, "rotation": 0.0},
+    "Forest": {"r": 0.7, "g": 1.4, "b": 0.75, "h": 0.33, "s": 1.25, "v": 1.05, "brightness": 1.05, "contrast": 1.15, "warmth": 0.05, "tint": 0.0, "vibrance": 0.2, "rotation": 0.0},
+    "Cyan": {"r": 2.50, "g": 2.50, "b": 2.50, "h": 0.50, "s": 1.40, "v": 2.00, "brightness": 1.15, "contrast": 1.00, "warmth": -0.30, "tint": 0.00, "vibrance": 0.25, "rotation": 0.0},
+    "Turquoise": {"r": 0.8, "g": 1.4, "b": 1.4, "h": 0.45, "s": 1.3, "v": 1.1, "brightness": 1.05, "contrast": 1.05, "warmth": -0.25, "tint": 0.0, "vibrance": 0.2, "rotation": 0.0},
+    "Sapphire": {"r": 2.50, "g": 0.00, "b": 2.47, "h": 0.50, "s": 1.30, "v": 1.05, "brightness": 2.00, "contrast": 0.98, "warmth": -1.00, "tint": 0.00, "vibrance": 0.20, "rotation": 0.0},
+    "Cobalt": {"r": 0.7, "g": 1.0, "b": 1.5, "h": 0.60, "s": 1.2, "v": 1.0, "brightness": 1.0, "contrast": 1.05, "warmth": -0.35, "tint": 0.0, "vibrance": 0.15, "rotation": 0.0},
+    "Navy": {"r": 0.8, "g": 0.95, "b": 1.5, "h": 0.64, "s": 1.2, "v": 1.0, "brightness": 1.0, "contrast": 1.1, "warmth": -0.35, "tint": 0.0, "vibrance": 0.2, "rotation": 0.0},
+    "Amethyst": {"r": 1.2, "g": 0.7, "b": 1.5, "h": 0.78, "s": 1.2, "v": 1.05, "brightness": 1.05, "contrast": 1.05, "warmth": 0.05, "tint": 0.2, "vibrance": 0.25, "rotation": 0.0},
+    "Violet": {"r": 2.50, "g": 2.50, "b": 0.00, "h": -0.26, "s": 2.00, "v": 2.00, "brightness": 2.00, "contrast": 1.06, "warmth": 0.03, "tint": 0.07, "vibrance": 0.50, "rotation": 0.0},
+    "Magenta": {"r": 1.5, "g": 0.7, "b": 1.3, "h": 0.90, "s": 1.4, "v": 1.1, "brightness": 1.1, "contrast": 1.05, "warmth": 0.1, "tint": 0.3, "vibrance": 0.3, "rotation": 0.0},
+    "Pink": {"r": 2.50, "g": 0.04, "b": 2.50, "h": -0.08, "s": 2.00, "v": 2.00, "brightness": 2.00, "contrast": 1.10, "warmth": -0.11, "tint": 0.20, "vibrance": 0.20, "rotation": 0.0},
+    "Silver": {"r": 1.20, "g": 0.00, "b": 1.20, "h": -0.50, "s": 0.40, "v": 2.00, "brightness": 2.00, "contrast": 0.84, "warmth": 0.00, "tint": 0.00, "vibrance": -0.20, "rotation": 0.0},
+    "Platinum": {"r": 2.50, "g": 0.00, "b": 0.00, "h": 0.50, "s": 0.29, "v": 2.00, "brightness": 1.75, "contrast": 0.71, "warmth": -0.10, "tint": 0.00, "vibrance": -0.47, "rotation": 0.0},
+    "Obsidian": {"r": 1.1, "g": 1.0, "b": 1.2, "h": 0.75, "s": 0.8, "v": 0.9, "brightness": 0.9, "contrast": 1.25, "warmth": -0.2, "tint": 0.1, "vibrance": 0.1, "rotation": 0.0},
+    "Shadow": {"r": 2.50, "g": 0.00, "b": 0.00, "h": 0.50, "s": 1.30, "v": 1.89, "brightness": 0.81, "contrast": 1.15, "warmth": -0.44, "tint": 0.32, "vibrance": 0.25, "rotation": 0.0},
+    "Arcane": {"r": 2.50, "g": 0.00, "b": 0.00, "h": 0.50, "s": 0.00, "v": 1.71, "brightness": 2.00, "contrast": 1.35, "warmth": -0.18, "tint": -0.07, "vibrance": 0.43, "rotation": 0.0},
+    "OSRS Phat Red": {"r": 2.2, "g": 0.4, "b": 0.4, "h": 0.0, "s": 1.8, "v": 0.7, "brightness": 0.8, "contrast": 1.2, "warmth": 0.4, "tint": 0.0, "vibrance": 0.3, "rotation": 0.0},
+    "OSRS Phat Yellow": {"r": 1.8, "g": 2.0, "b": 0.3, "h": 0.09, "s": 1.8, "v": 1.5, "brightness": 1.5, "contrast": 1.0, "warmth": 0.6, "tint": 0.0, "vibrance": 0.4, "rotation": 0.0},
+    "OSRS Phat Green": {"r": 0.4, "g": 2.2, "b": 0.4, "h": 0.33, "s": 1.8, "v": 1.4, "brightness": 1.4, "contrast": 1.1, "warmth": 0.0, "tint": 0.0, "vibrance": 0.4, "rotation": 0.0},
+    "OSRS Phat Blue": {"r": 0.3, "g": 0.3, "b": 2.2, "h": 0.66, "s": 1.7, "v": 0.9, "brightness": 0.9, "contrast": 1.2, "warmth": -0.5, "tint": 0.0, "vibrance": 0.3, "rotation": 0.0},
+    "OSRS Phat Purple": {"r": 1.5, "g": 0.4, "b": 2.0, "h": 0.80, "s": 1.8, "v": 1.3, "brightness": 1.3, "contrast": 1.1, "warmth": 0.1, "tint": 0.2, "vibrance": 0.4, "rotation": 0.0},
+}
+
+# ===============================================================
+# PROPERTIES
+# ===============================================================
+class RGBProperties(bpy.types.PropertyGroup):
+    def update_trigger(self, context):
+        refresh_materials(context)
+    r_value: bpy.props.FloatProperty(name="R", default=1.0, min=0.0, max=2.5, update=update_trigger)
+    g_value: bpy.props.FloatProperty(name="G", default=1.0, min=0.0, max=2.5, update=update_trigger)
+    b_value: bpy.props.FloatProperty(name="B", default=1.0, min=0.0, max=2.5, update=update_trigger)
+    hue_value: bpy.props.FloatProperty(name="Hue", default=0.0, min=-0.5, max=0.5, update=update_trigger)
+    saturation_value: bpy.props.FloatProperty(name="Saturation", default=1.0, min=0.0, max=2.0, update=update_trigger)
+    value_value: bpy.props.FloatProperty(name="Value", default=1.0, min=0.1, max=3.0, update=update_trigger)
+    brightness_value: bpy.props.FloatProperty(name="Brightness", default=1.0, min=0.1, max=3.0, update=update_trigger)
+    contrast_value: bpy.props.FloatProperty(name="Contrast", default=1.0, min=0.5, max=2.0, update=update_trigger)
+    warmth_value: bpy.props.FloatProperty(name="Warmth", default=0.0, min=-1.0, max=1.0, update=update_trigger)
+    tint_value: bpy.props.FloatProperty(name="Tint", default=0.0, min=-1.0, max=1.0, update=update_trigger)
+    vibrance_value: bpy.props.FloatProperty(name="Vibrance", default=0.0, min=-0.5, max=0.5, update=update_trigger)
+    color_rotation_value: bpy.props.FloatProperty(name="Color Rotation", default=0.0, min=-1.0, max=1.0, update=update_trigger)
+    shadows_value: bpy.props.FloatProperty(name="Shadows", default=0.0, min=-1.0, max=1.0, description="Positive: crush to black (darker), Negative: lift shadows (brighter dark areas)", update=update_trigger)
+    alpha_value: bpy.props.FloatProperty(name="Opacity", default=100.0, min=0.0, max=100.0, update=update_trigger)
+
+# ===============================================================
+# UI PANEL
 # ===============================================================
 class AETHER_PT_ColorTint(bpy.types.Panel):
-    """Aether Color Tint Panel - Integrated into Texture Tool"""
-    bl_label = "Aether Color Tint"
+    bl_label = "Aether Material Engine"
     bl_idname = "AETHER_PT_color_tint"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -450,95 +483,111 @@ class AETHER_PT_ColorTint(bpy.types.Panel):
     bl_options = {'DEFAULT_CLOSED'}
     def draw(self, context):
         layout = self.layout
+        props = context.scene.aether_rgb_props
         obj = context.active_object
-        selected_mesh_count = len([o for o in context.selected_objects if o.type == 'MESH'])
-        rgb_props = context.scene.aether_rgb_props
-        if obj and obj.type == 'MESH':
-            if selected_mesh_count > 1:
-                info_box = layout.box()
-                info_box.label(text=f"Selected: {selected_mesh_count} objects", icon='OBJECT_DATA')
+        if obj and obj.type == 'MESH' and obj.mode == 'EDIT':
             box = layout.box()
-            box.label(text="UV to Materials:", icon='MATERIAL')
-            box.operator("aether.select_texture")
-            presets_box = layout.box()
-            presets_box.label(text="Presets:", icon='COLOR')
-            row = presets_box.row(align=True)
-            for i, (name, _) in enumerate(PRESETS.items()):
-                if i % 5 == 0 and i > 0:
-                    row = presets_box.row(align=True)
-                op = row.operator("aether.apply_preset", text=name, icon='COLOR')
-                op.preset_name = name
-            box = layout.box()
-            box.label(text="Color Controls:", icon='COLOR')
-            if selected_mesh_count > 1:
-                box.label(text="Affects all selected objects", icon='INFO')
-            if context.mode == 'EDIT_MESH':
-                box.label(text="Affects materials of selected faces", icon='INFO')
-            box.prop(rgb_props, "r_value")
-            box.prop(rgb_props, "g_value")
-            box.prop(rgb_props, "b_value")
-            box.prop(rgb_props, "hue_value")
-            box.prop(rgb_props, "saturation_value")
-            box.prop(rgb_props, "value_value")
-            box.separator()
-            box.operator("aether.apply_original_colors", text="Apply Original Colors")
-            box.operator("aether.reset_materials", text="Reset to Original Colors")
-            box.operator("aether.randomize_theme", text="Randomize Theme")
-            box = layout.box()
-            box.label(text="Alpha Transparency:", icon='SHADING_RENDERED')
-            if context.mode == 'EDIT_MESH':
-                box.label(text="1. Select faces", icon='EDITMODE_HLT')
-                box.label(text="2. Enable alpha on their materials:")
-                box.operator("aether.enable_alpha")
-                bm = bmesh.from_edit_mesh(obj.data)
-                selected_faces = [f for f in bm.faces if f.select]
-                selected_mat_indices = set(f.material_index for f in selected_faces) if selected_faces else set()
-                has_alpha_enabled = False
-                for mat_idx in selected_mat_indices:
-                    if mat_idx < len(obj.data.materials):
-                        mat = obj.data.materials[mat_idx]
-                        if mat and mat.blend_method == 'BLEND':
-                            has_alpha_enabled = True
-                            break
-                if has_alpha_enabled:
-                    box.separator()
-                    box.label(text="Alpha Control (Selected Materials):")
-                    if selected_mesh_count > 1:
-                        box.label(text="Affects selected faces on all objects", icon='INFO')
-                    box.prop(rgb_props, "alpha_value")
-                else:
-                    box.label(text="Select faces with alpha to adjust", icon='INFO')
-            else:
-                box.label(text="Enter Edit Mode to enable alpha", icon='INFO')
-                has_alpha = any(mat.blend_method == 'BLEND' for mat in obj.data.materials if mat)
-                if has_alpha:
-                    box.separator()
-                    box.label(text="Alpha Control (All Alpha Materials):")
-                    if selected_mesh_count > 1:
-                        box.label(text="Affects all selected objects", icon='INFO')
-                    box.prop(rgb_props, "alpha_value")
+            box.alert = True
+            box.label(text="EDIT MODE: Only selected faces affected", icon='FACESEL')
+        layout.operator("aether.optimize_shading", text="⚡ Optimize OSRS Shading", icon='SHADING_SOLID')
+        box = layout.box()
+        box.label(text="Color Presets", icon='COLOR')
+        col = box.column(align=True)
+        row = col.row(align=True)
+        row.label(text="Reds:")
+        for name in ["Crimson", "Ruby", "Wine"]:
+            op = row.operator("aether.apply_preset", text=name)
+            op.preset_name = name
+        row = col.row(align=True)
+        row.label(text="Oranges:")
+        for name in ["Tangerine", "Gold", "Bronze"]:
+            op = row.operator("aether.apply_preset", text=name)
+            op.preset_name = name
+        row = col.row(align=True)
+        row.label(text="Greens:")
+        for name in ["Emerald", "Jade", "Lime", "Forest"]:
+            op = row.operator("aether.apply_preset", text=name)
+            op.preset_name = name
+        row = col.row(align=True)
+        row.label(text="Blues:")
+        for name in ["Cyan", "Turquoise", "Sapphire", "Cobalt", "Navy"]:
+            op = row.operator("aether.apply_preset", text=name)
+            op.preset_name = name
+        row = col.row(align=True)
+        row.label(text="Purples:")
+        for name in ["Amethyst", "Violet", "Magenta", "Pink"]:
+            op = row.operator("aether.apply_preset", text=name)
+            op.preset_name = name
+        row = col.row(align=True)
+        row.label(text="Neutral:")
+        for name in ["Silver", "Platinum", "Obsidian"]:
+            op = row.operator("aether.apply_preset", text=name)
+            op.preset_name = name
+        row = col.row(align=True)
+        row.label(text="Special:")
+        for name in ["Shadow", "Arcane"]:
+            op = row.operator("aether.apply_preset", text=name)
+            op.preset_name = name
+        row = col.row(align=True)
+        row.label(text="OSRS Partyhats:")
+        for name in ["OSRS Phat Red", "OSRS Phat Yellow", "OSRS Phat Green", "OSRS Phat Blue", "OSRS Phat Purple"]:
+            op = row.operator("aether.apply_preset", text=name.split()[-1])
+            op.preset_name = name
+        basic = layout.box()
+        basic.label(text="Base Theme", icon='COLORSET_01_VEC')
+        row = basic.row(align=True)
+        row.prop(props, "r_value", slider=True)
+        row.prop(props, "g_value", slider=True)
+        row.prop(props, "b_value", slider=True)
+        row = basic.row(align=True)
+        row.prop(props, "hue_value", slider=True)
+        row.prop(props, "saturation_value", slider=True)
+        basic.prop(props, "value_value", slider=True)
+        atmos = layout.box()
+        atmos.label(text="Atmosphere", icon='SHADING_RENDERED')
+        atmos.prop(props, "brightness_value", slider=True)
+        atmos.prop(props, "contrast_value", slider=True)
+        row = atmos.row(align=True)
+        row.prop(props, "warmth_value", slider=True)
+        row.prop(props, "tint_value", slider=True)
+        atmos.prop(props, "vibrance_value", slider=True)
+        atmos.prop(props, "color_rotation_value", slider=True)
+        # Shadows control
+        shadows_box = layout.box()
+        shadows_box.label(text="Shadows Control", icon='LIGHT')
+        shadows_box.prop(props, "shadows_value", slider=True)
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator("aether.apply_original_colors", icon='CHECKMARK')
+        row.operator("aether.reset_materials", icon='LOOP_BACK')
+        row = layout.row(align=True)
+        row.operator("aether.randomize_theme", text="Random Vibrant Theme", icon='QUESTION')
+        row.operator("aether.print_current_preset", text="Print Preset", icon='COPYDOWN')
+        layout.prop(props, "alpha_value", slider=True)
+
 # ===============================================================
 # REGISTRATION
 # ===============================================================
 classes = (
     RGBProperties,
-    AETHER_OT_SelectTexture,
+    AETHER_OT_OptimizeShading,
+    AETHER_OT_ApplyPreset,
     AETHER_OT_ResetMaterials,
     AETHER_OT_RandomizeTheme,
     AETHER_OT_ApplyOriginalColors,
-    AETHER_OT_EnableAlpha,
-    AETHER_OT_ApplyPreset,
+    AETHER_OT_PrintCurrentPreset,
     AETHER_PT_ColorTint,
 )
+
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    # Register scene-level properties
     bpy.types.Scene.aether_rgb_props = bpy.props.PointerProperty(type=RGBProperties)
+
 def unregister():
-    # Unregister scene-level properties
     del bpy.types.Scene.aether_rgb_props
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+
 if __name__ == "__main__":
     register()
